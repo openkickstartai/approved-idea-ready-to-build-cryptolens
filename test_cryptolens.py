@@ -89,3 +89,99 @@ def test_snippet_truncated_to_120_chars():
     findings = scan_content(line, "t.py")
     assert len(findings) > 0
     assert len(findings[0].snippet) <= 120
+
+
+import pytest
+import jsonschema
+from cryptolens import validate_cbom
+
+
+def _make_valid_finding(**overrides):
+    base = {
+        "algorithm": "AES-256",
+        "category": "symmetric",
+        "file_path": "crypto.py",
+        "line_number": 42,
+        "quantum_safe": True,
+        "severity": "info",
+        "recommendation": "PQ-safe with 256-bit keys",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_cbom_valid_report():
+    report = {
+        "findings": [
+            _make_valid_finding(),
+            _make_valid_finding(
+                algorithm="MD5",
+                category="hash",
+                file_path="auth.py",
+                line_number=7,
+                quantum_safe=False,
+                severity="critical",
+                recommendation="Replace with SHA-256 or SHA-3",
+            ),
+        ]
+    }
+    assert validate_cbom(report) is True
+
+
+def test_validate_cbom_empty_findings():
+    report = {"findings": []}
+    assert validate_cbom(report) is True
+
+
+def test_validate_cbom_missing_required_fields():
+    report = {
+        "findings": [
+            {
+                "algorithm": "RSA",
+                "category": "asymmetric",
+                # missing file_path, line_number, quantum_safe, severity, recommendation
+            }
+        ]
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validate_cbom(report)
+
+
+def test_validate_cbom_wrong_type_line_number():
+    report = {
+        "findings": [
+            _make_valid_finding(line_number="not_an_integer"),
+        ]
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validate_cbom(report)
+
+
+def test_validate_cbom_invalid_category_enum():
+    report = {
+        "findings": [
+            _make_valid_finding(category="broken"),
+        ]
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validate_cbom(report)
+
+
+def test_validate_cbom_invalid_severity_enum():
+    report = {
+        "findings": [
+            _make_valid_finding(severity="high"),
+        ]
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validate_cbom(report)
+
+
+def test_validate_cbom_wrong_type_quantum_safe():
+    report = {
+        "findings": [
+            _make_valid_finding(quantum_safe="yes"),
+        ]
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        validate_cbom(report)
