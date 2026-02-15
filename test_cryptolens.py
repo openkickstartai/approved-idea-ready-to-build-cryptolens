@@ -1,5 +1,6 @@
 """Tests for CryptoLens scanner engine."""
-from cryptolens import scan_content, compute_score, generate_report, Finding
+from cryptolens import scan_content, compute_score, generate_report, Finding, calculate_pq_readiness
+
 
 
 def test_detects_broken_md5():
@@ -185,3 +186,115 @@ def test_validate_cbom_wrong_type_quantum_safe():
     }
     with pytest.raises(jsonschema.ValidationError):
         validate_cbom(report)
+
+
+# === Tests for calculate_pq_readiness ===
+
+def test_pq_readiness_empty_input():
+    """Empty findings should return perfect score of 100."""
+    result = calculate_pq_readiness([])
+    assert result["score"] == 100
+    assert result["total_findings"] == 0
+    assert result["quantum_safe_count"] == 0
+    assert result["quantum_unsafe_count"] == 0
+    assert result["critical_items"] == []
+
+
+def test_pq_readiness_all_safe():
+    """All quantum-safe findings should yield score=100."""
+    findings = [
+        {"algorithm": "AES-256", "category": "symmetric", "quantum_safe": True},
+        {"algorithm": "SHA-256", "category": "hash", "quantum_safe": True},
+        {"algorithm": "ML-KEM/Kyber", "category": "asymmetric", "quantum_safe": True},
+    ]
+    result = calculate_pq_readiness(findings)
+    assert result["score"] == 100
+    assert result["quantum_safe_count"] == 3
+    assert result["quantum_unsafe_count"] == 0
+    assert result["critical_items"] == []
+
+
+def test_pq_readiness_all_unsafe_asymmetric():
+    """All unsafe asymmetric findings: score should floor at 0."""
+    findings = [
+        {"algorithm": "RSA", "category": "asymmetric", "quantum_safe": False},
+        {"algorithm": "ECDSA", "category": "asymmetric", "quantum_safe": False},
+    ]
+    result = calculate_pq_readiness(findings)
+    # round(0/2 * 100) = 0, then -10*2 = -20, floor at 0
+    assert result["score"] == 0
+    assert result["quantum_safe_count"] == 0
+    assert result["quantum_unsafe_count"] == 2
+    assert len(result["critical_items"]) == 2
+
+
+def test_pq_readiness_mixed_input():
+    """Mixed safe/unsafe with one critical asymmetric item."""
+    findings = [
+        {"algorithm": "AES-256", "category": "symmetric", "quantum_safe": True},
+        {"algorithm": "RSA", "category": "asymmetric", "quantum_safe": False},
+        {"algorithm": "SHA-256", "category": "hash", "quantum_safe": True},
+    ]
+    result = calculate_pq_readiness(findings)
+    # round(2/3 * 100) = 67, then -10*1 = 57
+    assert result["score"] == 57
+    assert result["total_findings"] == 3
+    assert result["quantum_safe_count"] == 2
+    assert result["quantum_unsafe_count"] == 1
+    assert len(result["critical_items"]) == 1
+    assert result["critical_items"][0]["algorithm"] == "RSA"
+
+
+def test_pq_readiness_single_safe_finding():
+    """Single safe finding should yield score=100."""
+    findings = [{"algorithm": "AES-256", "category": "symmetric", "quantum_safe": True}]
+    result = calculate_pq_readiness(findings)
+    assert result["score"] == 100
+    assert result["total_findings"] == 1
+    assert result["quantum_safe_count"] == 1
+    assert result["quantum_unsafe_count"] == 0
+
+
+def test_pq_readiness_single_unsafe_asymmetric():
+    """Single unsafe asymmetric finding: score floors at 0."""
+    findings = [{"algorithm": "RSA", "category": "asymmetric", "quantum_safe": False}]
+    result = calculate_pq_readiness(findings)
+    # round(0/1 * 100) = 0, then -10*1 = -10, floor at 0
+    assert result["score"] == 0
+    assert len(result["critical_items"]) == 1
+
+
+def test_pq_readiness_critical_items_only_asymmetric():
+    """critical_items must only contain asymmetric findings, not hash/symmetric."""
+    findings = [
+        {"algorithm": "MD5", "category": "hash", "quantum_safe": False},
+        {"algorithm": "3DES", "category": "symmetric", "quantum_safe": False},
+        {"algorithm": "RSA", "category": "asymmetric", "quantum_safe": False},
+        {"algorithm": "AES-256", "category": "symmetric", "quantum_safe": True},
+    ]
+    result = calculate_pq_readiness(findings)
+    assert len(result["critical_items"]) == 1
+    assert result["critical_items"][0]["algorithm"] == "RSA"
+    assert result["quantum_unsafe_count"] == 3
+
+
+def test_pq_readiness_unsafe_non_asymmetric_no_extra_penalty():
+    """Unsafe non-asymmetric findings reduce base score but no extra -10 penalty."""
+    findings = [
+        {"algorithm": "MD5", "category": "hash", "quantum_safe": False},
+    ]
+    result = calculate_pq_readiness(findings)
+    # round(0/1 * 100) = 0, no critical items so no extra penalty
+    assert result["score"] == 0
+    assert result["critical_items"] == []
+
+
+def test_pq_readiness_summary_message():
+    """Summary string should contain the count of critical asymmetric items."""
+    findings = [
+        {"algorithm": "RSA", "category": "asymmetric", "quantum_safe": False},
+        {"algorithm": "ECDSA", "category": "asymmetric", "quantum_safe": False},
+        {"algorithm": "ECDH", "category": "asymmetric", "quantum_safe": False},
+    ]
+    result = calculate_pq_readiness(findings)
+    assert "3 quantum-unsafe asymmetric usages that require migration" in result["summary"]
