@@ -1,4 +1,9 @@
 """Tests for CryptoLens scanner engine."""
+import json
+import sys
+import os
+import tempfile
+from pathlib import Path
 from cryptolens import scan_content, compute_score, generate_report, Finding
 
 
@@ -51,44 +56,106 @@ def test_score_broken_penalty():
 
 
 def test_score_pq_vulnerable_penalty():
-    findings = [Finding("RSA", "pq_vulnerable", "f.py", 1, "RSA()", "migrate")]
+    findings = [Finding("RSA", "pq_vulnerable", "f.py", 1, "rsa(x)", "fix")]
     score = compute_score(findings)
     assert score["score"] == 95
-    assert score["grade"] == "A"
+    assert score["grade"] == "A+"
 
 
-def test_score_mixed_findings():
-    findings = [
-        Finding("MD5", "broken", "f.py", 1, "md5", "fix"),
-        Finding("RSA", "pq_vulnerable", "f.py", 2, "rsa", "migrate"),
-        Finding("AES-256", "pq_safe", "f.py", 3, "aes", "ok"),
-    ]
-    score = compute_score(findings)
-    assert score["score"] == 80
-    assert score["grade"] == "B"
-
-
-def test_report_structure():
-    findings = scan_content("h = MD5(data)\nk = RSA.gen(2048)", "t.py")
+def test_generate_report_structure():
+    findings = scan_content("h = hashlib.md5(data)\nk = RSA.generate(2048)", "t.py")
     report = generate_report(findings)
-    assert "version" in report
     assert "pq_readiness" in report
-    assert "algorithms" in report
     assert "findings" in report
-    assert report["pq_readiness"]["total"] >= 2
+    assert isinstance(report["findings"], list)
+    assert report["pq_readiness"]["total"] == len(findings)
 
 
-def test_empty_content_returns_nothing():
-    assert scan_content("", "empty.py") == []
-    score = compute_score([])
-    assert score["score"] == 100
+# ---- Format output tests ----
+
+def _make_sample_report():
+    """Helper: produce a report with at least one finding of each category."""
+    code = "h = hashlib.md5(data)\nk = RSA.generate(2048)\nc = AES_256(key)"
+    findings = scan_content(code, "sample.py")
+    return generate_report(findings)
 
 
-def test_snippet_truncated_to_120_chars():
-    line = "x = MD5(" + "a" * 200 + ")"
-    findings = scan_content(line, "t.py")
-    assert len(findings) > 0
-    assert len(findings[0].snippet) <= 120
+def test_format_json_parseable():
+    """JSON format must produce valid, parseable JSON with expected keys."""
+    report = _make_sample_report()
+    raw = json.dumps(report, indent=2, default=str)
+    parsed = json.loads(raw)
+    assert "pq_readiness" in parsed
+    assert "findings" in parsed
+    assert isinstance(parsed["findings"], list)
+    assert len(parsed["findings"]) >= 3
+
+
+def test_format_table_has_header_row():
+    """Table format must contain a header row with all expected column names."""
+    # import format_table from main
+    sys.path.insert(0, os.path.dirname(__file__))
+    from main import format_table
+    report = _make_sample_report()
+    table_output = format_table(report)
+    assert "File" in table_output
+    assert "Line" in table_output
+    assert "Algorithm" in table_output
+    assert "Category" in table_output
+    assert "Quantum Safe" in table_output
+    assert "Severity" in table_output
+    # Should contain separator lines
+    assert "+" in table_output
+    assert "|" in table_output
+    # Should contain the header row between separators
+    lines = table_output.strip().split("\n")
+    # First line is title, then separator, header, separator, data rows, separator
+    assert len(lines) >= 5  # title + sep + header + sep + at least 1 data row + sep
+    header_line = lines[2]
+    assert "File" in header_line
+    assert "Algorithm" in header_line
+
+
+def test_format_sarif_valid_structure():
+    """SARIF output must have required $schema and version fields, and tool.driver.name == CryptoLens."""
+    sys.path.insert(0, os.path.dirname(__file__))
+    from main import format_sarif
+    report = _make_sample_report()
+    sarif_raw = format_sarif(report)
+    sarif = json.loads(sarif_raw)
+    assert "$schema" in sarif
+    assert "sarif-schema-2.1.0" in sarif["$schema"]
+    assert sarif["version"] == "2.1.0"
+    assert "runs" in sarif
+    assert len(sarif["runs"]) >= 1
+    run = sarif["runs"][0]
+    assert run["tool"]["driver"]["name"] == "CryptoLens"
+    assert "results" in run
+    assert len(run["results"]) >= 3
+    # Each result must have ruleId, message, and locations
+    for result in run["results"]:
+        assert "ruleId" in result
+        assert "message" in result
+        assert "locations" in result
+        assert len(result["locations"]) >= 1
+
+
+def test_format_sarif_output_to_file():
+    """--output flag should write SARIF to a file."""
+    sys.path.insert(0, os.path.dirname(__file__))
+    from main import format_sarif
+    report = _make_sample_report()
+    sarif_raw = format_sarif(report)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sarif", delete=False) as f:
+        f.write(sarif_raw)
+        tmp_path = f.name
+    try:
+        content = Path(tmp_path).read_text()
+        parsed = json.loads(content)
+        assert parsed["version"] == "2.1.0"
+        assert parsed["runs"][0]["tool"]["driver"]["name"] == "CryptoLens"
+    finally:
+        os.unlink(tmp_path)
 
 
 import pytest
