@@ -1,8 +1,10 @@
 """CryptoLens — core scanning engine for cryptographic usage detection."""
+import json
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Dict
+
 
 
 @dataclass
@@ -94,3 +96,17 @@ def generate_report(findings: List[Finding]) -> Dict:
         "algorithms": algos,
         "findings": [asdict(f) for f in findings],
     }
+
+
+def validate_cbom(report: dict) -> bool:
+    """Validate a CBOM report dict against the CBOM JSON schema.
+
+    Returns True if valid. Raises jsonschema.ValidationError if malformed.
+    """
+    import jsonschema
+
+    schema_path = Path(__file__).parent / "cbom_schema.json"
+    with open(schema_path, "r") as f:
+        schema = json.load(f)
+    jsonschema.validate(instance=report, schema=schema)
+    return True
